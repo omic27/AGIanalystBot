@@ -72,7 +72,11 @@ async def forecast_input(m: Message):
     if m.text and m.text.startswith("/"):
         return
 
-    data = await extract_match_with_openai(m)
+    try:
+        data = await extract_match_with_openai(m)
+    except Exception:
+        await m.answer(FALLBACK_SKIP_MESSAGE, reply_markup=main_menu())
+        return
     match = (data.get("match") or "").strip()
     league = (data.get("league") or "").strip()
     dt = (data.get("datetime") or "").strip()
@@ -119,6 +123,7 @@ async def match_ok(c: CallbackQuery):
     payload_id = c.data.split(":")[-1]
     payload = PENDING_MATCH.pop(payload_id, None)
     if not payload or payload["user_id"] != c.from_user.id:
+        await c.message.answer("Сессия устарела, отправь матч заново.", reply_markup=main_menu())
         await c.answer("Сессия устарела, отправь матч заново.", show_alert=True)
         return
 
@@ -127,37 +132,41 @@ async def match_ok(c: CallbackQuery):
         await c.answer()
         return
 
-    # списываем 1 запрос
-    async with aiosqlite.connect("bot.sqlite3") as db:
-        ok = await spend_query(db, c.from_user.id, 1)
-        if not ok:
-            await c.message.answer(NOT_ENOUGH_QUERIES, reply_markup=main_menu(), parse_mode="Markdown")
-            await c.answer()
-            return
-
-    # грузим brains pack
-    brains_pack = load_brains_text("data/brains")
-    system = build_forecast_system(brains_pack)
-    user_prompt = build_forecast_user(payload["match_text"])
-
-    client = build_openai(settings.OPENAI_API_KEY)
     try:
-        resp = await client.chat.completions.create(
-            model=settings.OPENAI_TEXT_MODEL,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.4
-        )
-        answer = resp.choices[0].message.content or ""
+        # списываем 1 запрос
+        async with aiosqlite.connect("bot.sqlite3") as db:
+            ok = await spend_query(db, c.from_user.id, 1)
+            if not ok:
+                await c.message.answer(NOT_ENOUGH_QUERIES, reply_markup=main_menu(), parse_mode="Markdown")
+                await c.answer()
+                return
+
+        # грузим brains pack
+        brains_pack = load_brains_text("data/brains")
+        system = build_forecast_system(brains_pack)
+        user_prompt = build_forecast_user(payload["match_text"])
+
+        client = build_openai(settings.OPENAI_API_KEY)
+        try:
+            resp = await client.chat.completions.create(
+                model=settings.OPENAI_TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.4
+            )
+            answer = resp.choices[0].message.content or ""
+        except Exception:
+            answer = ""
+        if not answer:
+            answer = FALLBACK_SKIP_MESSAGE
+
+        async with aiosqlite.connect("bot.sqlite3") as db:
+            await save_forecast(db, c.from_user.id, payload["match_text"], answer)
+
+        await c.message.answer(answer, reply_markup=main_menu())
+        await c.answer()
     except Exception:
-        answer = ""
-    if not answer:
-        answer = FALLBACK_SKIP_MESSAGE
-
-    async with aiosqlite.connect("bot.sqlite3") as db:
-        await save_forecast(db, c.from_user.id, payload["match_text"], answer)
-
-    await c.message.answer(answer, reply_markup=main_menu())
-    await c.answer()
+        await c.message.answer(FALLBACK_SKIP_MESSAGE, reply_markup=main_menu())
+        await c.answer()
