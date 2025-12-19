@@ -58,12 +58,10 @@ async def user_paid(c: CallbackQuery):
     await c.message.answer("Ок ✅ Пришли txid или скрин перевода одним сообщением.")
     await c.answer()
 
-@router.message()
+@router.message(lambda m: m.from_user is not None and m.from_user.id in USER_PAY)
 async def payment_proof_or_ignore(m: Message):
     # ловим доказательство оплаты, если юзер в режиме "я оплатил"
     user_id = m.from_user.id
-    if user_id not in USER_PAY:
-        return  # пусть обработают другие хендлеры
 
     settings = get_settings()
     payment_id = USER_PAY.pop(user_id)

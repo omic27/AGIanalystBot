@@ -20,6 +20,7 @@ router = Router()
 
 # in-memory payload storage (MVP)
 PENDING_MATCH = {}  # payload_id -> dict(user_id, match_text)
+FALLBACK_SKIP_MESSAGE = "ПРОПУСК: недостаточно данных или ошибка источника. Попробуй позже."
 
 def _extract_text_from_message(m: Message) -> tuple[str, list[str]]:
     # return raw_text + image_urls placeholders
@@ -44,15 +45,21 @@ async def extract_match_with_openai(m: Message) -> dict:
     if not raw_text and image_file_ids:
         return {"match": "", "league": "", "datetime": "", "notes": "Нужен текст из матча (скопируй/вставь) или добавь подпись."}
 
-    resp = await client.chat.completions.create(
-        model=settings.OPENAI_TEXT_MODEL,
-        messages=[
-            {"role": "system", "content": MATCH_EXTRACT_SYSTEM},
-            {"role": "user", "content": raw_text}
-        ],
-        temperature=0.2
-    )
-    content = resp.choices[0].message.content or "{}"
+    if not settings.OPENAI_API_KEY:
+        return {"match": "", "league": "", "datetime": "", "notes": FALLBACK_SKIP_MESSAGE}
+
+    try:
+        resp = await client.chat.completions.create(
+            model=settings.OPENAI_TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": MATCH_EXTRACT_SYSTEM},
+                {"role": "user", "content": raw_text}
+            ],
+            temperature=0.2
+        )
+        content = resp.choices[0].message.content or "{}"
+    except Exception:
+        return {"match": "", "league": "", "datetime": "", "notes": FALLBACK_SKIP_MESSAGE}
     try:
         data = json.loads(content)
     except Exception:
@@ -72,7 +79,11 @@ async def forecast_input(m: Message):
     notes = (data.get("notes") or "").strip()
 
     if not match:
-        await m.answer("Не смог уверенно распознать матч 😕\n\nПришли *скопированный текст* из матча (команды/лига/дата).", parse_mode="Markdown")
+        extra_note = f"\n\n{notes}" if notes else ""
+        await m.answer(
+            "Не смог уверенно распознать матч 😕\n\nПришли *скопированный текст* из матча (команды/лига/дата)." + extra_note,
+            parse_mode="Markdown"
+        )
         return
 
     extra = ""
@@ -111,6 +122,11 @@ async def match_ok(c: CallbackQuery):
         await c.answer("Сессия устарела, отправь матч заново.", show_alert=True)
         return
 
+    if not settings.OPENAI_API_KEY:
+        await c.message.answer(FALLBACK_SKIP_MESSAGE, reply_markup=main_menu())
+        await c.answer()
+        return
+
     # списываем 1 запрос
     async with aiosqlite.connect("bot.sqlite3") as db:
         ok = await spend_query(db, c.from_user.id, 1)
@@ -125,15 +141,20 @@ async def match_ok(c: CallbackQuery):
     user_prompt = build_forecast_user(payload["match_text"])
 
     client = build_openai(settings.OPENAI_API_KEY)
-    resp = await client.chat.completions.create(
-        model=settings.OPENAI_TEXT_MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_prompt}
-        ],
-        temperature=0.4
-    )
-    answer = resp.choices[0].message.content or "Не получилось сформировать ответ."
+    try:
+        resp = await client.chat.completions.create(
+            model=settings.OPENAI_TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.4
+        )
+        answer = resp.choices[0].message.content or ""
+    except Exception:
+        answer = ""
+    if not answer:
+        answer = FALLBACK_SKIP_MESSAGE
 
     async with aiosqlite.connect("bot.sqlite3") as db:
         await save_forecast(db, c.from_user.id, payload["match_text"], answer)
