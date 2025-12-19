@@ -166,8 +166,8 @@ async def match_ok(c: CallbackQuery):
         async with aiosqlite.connect("bot.sqlite3") as db:
             await save_forecast(db, c.from_user.id, payload["match_text"], answer)
 
-        await c.message.answer(answer, reply_markup=main_menu())
+        await c.message.answer(answer, reply_markup=main_menu(), parse_mode=None)
         await c.answer()
     except Exception:
-        await c.message.answer(FALLBACK_SKIP_MESSAGE, reply_markup=main_menu())
+        await c.message.answer(FALLBACK_SKIP_MESSAGE, reply_markup=main_menu(), parse_mode=None)
         await c.answer()
